@@ -9,9 +9,9 @@
 #include "BluefruitConfig.h"
 #include "pitchToNote.h"
 
-#define FACTORYRESET_ENABLE         1
-#define MINIMUM_FIRMWARE_VERSION    "0.7.0"
-#define NUM_CAP_PADS 12
+#define FACTORYRESET_ENABLE       0 //If 1, the BLE device will factory reset, including any custom device name
+#define MINIMUM_FIRMWARE_VERSION  "0.7.0"
+#define NUM_CAP_PADS              12
 
 #ifndef _BV
 #define _BV(bit) (1 << (bit)) 
@@ -27,7 +27,24 @@ uint16_t lasttouched = 0;
 uint16_t currtouched = 0;
 
 // Which note should be played for each capacitive pad
-const byte note_pitches[NUM_CAP_PADS] = {pitchC3, pitchD3, pitchE3, pitchF3, pitchG3, pitchA3, pitchB3, pitchC4, pitchD4, pitchE4, pitchF4, pitchG4};
+
+//C Major
+//const byte note_pitches[NUM_CAP_PADS] = {pitchC3, pitchD3, pitchE3, pitchF3, pitchG3, pitchA3, pitchB3, pitchC4, pitchD4, pitchE4, pitchF4, pitchG4};
+
+//Major pentatonic, white-key transposed
+const byte note_pitches[NUM_CAP_PADS] = {pitchC4, pitchD4, pitchE4, pitchG4, pitchA4, pitchC5, pitchD5, pitchE5, pitchG5, pitchA5, pitchC6, pitchD6};
+
+//Egyptian, suspended, white-key transposed
+//const byte note_pitches[NUM_CAP_PADS] = {pitchG4, pitchA4, pitchC5, pitchD5, pitchF5, pitchG5, pitchA5, pitchC6, pitchD6, pitchF6, pitchG6, pitchA6};
+
+//#define CAP_DEBUG 1 //Comment this entire line out to turn off cap debug
+
+uint16_t max_filtered_vals[NUM_CAP_PADS];
+uint16_t filtered_data[NUM_CAP_PADS];
+
+#ifdef CAP_DEBUG
+uint16_t baseline_data[NUM_CAP_PADS];
+#endif
 
 bool isConnected = false;
 int current_note = note_pitches[0];
@@ -128,6 +145,31 @@ void setup_cap()
     }
   }
   Serial.println("Capacitive touch sensor found.");
+
+  for (uint8_t i = 0; i < NUM_CAP_PADS; i++)
+  {
+    max_filtered_vals[i] = 0;
+  }
+}
+
+//Manual calculation of is-touched bitmask. Call it "touched" if the value is below the max by at least 10%
+uint16_t detect_touched()
+{
+  uint16_t touched_mask = 0;
+  for (uint8_t i = 0; i < NUM_CAP_PADS; i++) 
+  {
+    filtered_data[i] = cap.filteredData(i);
+    if (filtered_data[i] > max_filtered_vals[i])
+    {
+      max_filtered_vals[i] = filtered_data[i];
+    }
+
+    if (filtered_data[i] < (uint16_t)(0.9 * (float)max_filtered_vals[i]))
+    {
+      touched_mask |= _BV(i);
+    }
+  }
+  return touched_mask;
 }
 
 void setup(void)
@@ -135,8 +177,8 @@ void setup(void)
   delay(500);
 
   Serial.begin(115200);
-  setup_cap();
   setup_ble_midi();
+  setup_cap();
 }
 
 void loop(void)
@@ -147,13 +189,34 @@ void loop(void)
   // bail if not connected
   if (!isConnected)
   {
-    Serial.println(F("Waiting for BLE connection..."));
+    //Serial.println(F("Waiting for BLE connection..."));
     delay(1000); //This might not work. It may block future connections. Test disconnecting and reconnecting to see if this needs more work.
   }
 
   // Get the currently touched pads
-  currtouched = cap.touched();
+  //currtouched = cap.touched();
+  currtouched = detect_touched();
   
+#ifdef CAP_DEBUG
+  for (uint8_t i = 0; i < NUM_CAP_PADS; i++) 
+  {
+    filtered_data[i] = cap.filteredData(i);
+    baseline_data[i] = cap.baselineData(i);
+  }
+
+  Serial.print("\n\nFiltered: ");
+  for (uint8_t i = 0; i < NUM_CAP_PADS; i++) 
+  {
+    Serial.print(filtered_data[i]);Serial.print("  ");
+  }
+  Serial.print("\nBaseline: ");
+  for (uint8_t i = 0; i < NUM_CAP_PADS; i++) 
+  {
+    Serial.print(baseline_data[i]);Serial.print("  ");
+  }
+  Serial.print("\nTouched: "); Serial.println(currtouched, BIN);
+  delay(250);
+#else
   for (uint8_t i = 0; i < NUM_CAP_PADS; i++) 
   {
     // rising edge: wasn't touched, now touched
@@ -168,6 +231,7 @@ void loop(void)
       noteOff(0, note_pitches[i], 64);
     }
   }
+#endif
 
   // reset our state
   lasttouched = currtouched;
