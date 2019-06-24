@@ -9,9 +9,9 @@
 #include "BluefruitConfig.h"
 #include "pitchToNote.h"
 
-//#define CAP_DEBUG 1 //Comment this entire line out to turn off cap debug
+//#define DEBUG_MODE 1 //Uncomment this line to operate in debug mode. In debug mode, it will just read the capacitance and analog input values and print them. Comment out this line entirely to operate in normal (non-debug) mode.
 
-#define FACTORYRESET_ENABLE       0 //If 1, the BLE device will factory reset, including any custom device name
+#define BLE_FACTORY_RESET_ENABLE       0 //If 1, the BLE device will factory reset and will revert any custom device name you've programmed into it. Avoid this unless something's really gone wrong in the BLE chip.
 #define MINIMUM_FIRMWARE_VERSION  "0.7.0"
 #define NUM_CAP_PADS              12
 
@@ -39,6 +39,28 @@ float read_analog_values()
     analog_values[i] = analogRead(analog_inputs[i]);
 }
 
+/* 
+  The resistance calculation is done using a voltage divide circuit. 
+  The calculation below assumes that the known resistance is on the positive leg 
+  and the unknown resistance is on the negative leg. 
+  Like so:
+ 
+               +---+ Vcc
+               |
+               \
+   R1 (known)  /
+               \
+               |
+               +---+ Vout (analog input pin to microcontroller)
+               |
+               \
+  R2 (unknown) /
+               \
+               |
+               +---+ Gnd
+
+  Vout = (Vcc * R2) / (R1 + R2)
+*/
 float get_resistance(int raw_value)
 {
   float Vout = raw_value * ((float)V_IN / ADC_MAX);
@@ -88,7 +110,7 @@ int new_note = current_note;
 uint16_t max_filtered_vals[NUM_CAP_PADS];
 uint16_t filtered_data[NUM_CAP_PADS];
 
-#ifdef CAP_DEBUG
+#ifdef DEBUG_MODE
 uint16_t baseline_data[NUM_CAP_PADS];
 #endif
 
@@ -134,7 +156,7 @@ void noteOff(byte channel, byte pitch, byte velocity) {
   midi.send(0x80 | channel, pitch, velocity);
 }
 
-//val should be a 14-bit value
+//val should be a 14-bit value representing pitch bend amount. 16383 is max bend up. 0 is max bend down. 8192 is no bend.
 void pitchBend(uint16_t val) {
   byte lsb = val & 0x007F;
   byte msb = (val & 0x3F10) >> 7;
@@ -151,7 +173,7 @@ void setup_ble_midi()
   }
   Serial.println( F("Bluefruit found.") );
 
-  if ( FACTORYRESET_ENABLE )
+  if ( BLE_FACTORY_RESET_ENABLE )
   {
     /* Perform a factory reset to make sure everything is in a known state */
     Serial.println(F("Performing a factory reset: "));
@@ -184,6 +206,14 @@ void setup_ble_midi()
   Serial.println(F("Waiting for BLE connection..."));
 }
 
+void reset_max_filtered_vals()
+{  
+  for (uint8_t i = 0; i < NUM_CAP_PADS; i++)
+  {
+    max_filtered_vals[i] = 0;
+  }
+}
+
 void setup_cap()
 {
   // Default address is 0x5A, if tied to 3.3V its 0x5B
@@ -198,10 +228,7 @@ void setup_cap()
   }
   Serial.println("Capacitive touch sensor found.");
 
-  for (uint8_t i = 0; i < NUM_CAP_PADS; i++)
-  {
-    max_filtered_vals[i] = 0;
-  }
+  reset_max_filtered_vals();
 }
 
 //Manual calculation of is-touched bitmask. Call it "touched" if the value is below the max by at least 10%
@@ -227,17 +254,24 @@ uint16_t detect_touched()
 void setup(void)
 {
   delay(500);
-
   Serial.begin(115200);
+  
+#ifndef DEBUG_MODE //No BLE activity in debug mode. Only sensor readings.  
   setup_ble_midi();
+#endif
+
   setup_cap();
 }
 
+unsigned long curr_time = 0;
 unsigned long last_analog_update_time = 0;
+unsigned long last_max_vals_reset_time = 0;
 unsigned long analog_update_millis = 100;
+unsigned long max_vals_reset_millis = 10000; //This controls how often the maximum capacitance values are reset. 
 
 void loop(void)
-{
+{  
+#ifndef DEBUG_MODE //No BLE activity in debug mode. Only sensor readings.
   // interval for each scanning ~ 500ms (non blocking)
   ble.update(500);
 
@@ -247,13 +281,23 @@ void loop(void)
     //Serial.println(F("Waiting for BLE connection..."));
     delay(1000); //This might not work. It may block future connections. Test disconnecting and reconnecting to see if this needs more work.
   }
+#endif
 
+  curr_time = millis();
+
+  //Resetting the max cap values every so often helps un-stick stuck inputs
+  if ((curr_time - last_max_vals_reset_time) > max_vals_reset_millis)
+  {
+    last_max_vals_reset_time = curr_time;
+    reset_max_filtered_vals();
+  }
+  
   //Get the currently touched pads and analog readings
   //currtouched = cap.touched();
   currtouched = detect_touched();
   read_analog_values();
   
-#ifdef CAP_DEBUG
+#ifdef DEBUG_MODE
   for (uint8_t i = 0; i < NUM_CAP_PADS; i++) 
   {
     filtered_data[i] = cap.filteredData(i);
@@ -283,20 +327,20 @@ void loop(void)
   {
     // rising edge: wasn't touched, now touched
     if ((currtouched & _BV(i)) && !(lasttouched & _BV(i)) ) {
-      Serial.print(i); Serial.println(" touched");
+      //Serial.print(i); Serial.println(" touched");
       noteOn(0, note_pitches[i], 64);
     }
     
     // falling edge: was touched, now isn't touched
     if (!(currtouched & _BV(i)) && (lasttouched & _BV(i)) ) {
-      Serial.print(i); Serial.println(" released");
+      //Serial.print(i); Serial.println(" released");
       noteOff(0, note_pitches[i], 64);
     }
   }
 
-  if ((millis() - last_analog_update_time) > analog_update_millis)
+  if ((curr_time - last_analog_update_time) > analog_update_millis)
   {
-    last_analog_update_time = millis();
+    last_analog_update_time = curr_time;
     for (uint8_t i = 0; i < NUM_ANALOG_INPUTS; i++) 
     {
       float stretch_percentage = get_stretch_percentage(get_resistance(analog_values[i]));
